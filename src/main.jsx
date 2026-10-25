@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { supabase } from './supabase';
 import './style.css';
 
-const blank = { name: '', dosage: '', reminder_time: '09:00', patient_id: '' };
+const blank = { name: '', dosage: '', reminder_time: '09:00', patient_id: '', start_date: '', duration_days: '7', long_term: false };
 const localDay = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
 const shortTime = (t) => { if (!t) return '—'; const [h,m] = t.slice(0,5).split(':').map(Number); return new Date(2000,0,1,h,m).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}); };
 const niceDate = (value) => { if (!value) return 'Not recorded'; const d = new Date(value); return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('en-US',{dateStyle:'medium',timeStyle:'short'}); };
@@ -21,7 +21,7 @@ function App() {
   const [msg,setMsg] = useState('');
   const [loading,setLoading] = useState(true);
   const [busy,setBusy] = useState(false);
-  const [form,setForm] = useState(blank);
+  const [form,setForm] = useState(() => ({...blank,start_date:localDay()}));
   const [editing,setEditing] = useState(null);
   const [page,setPage] = useState('dashboard');
   const [search,setSearch] = useState('');
@@ -79,10 +79,17 @@ function App() {
   async function saveMed(e) {
     e.preventDefault();setBusy(true);setMsg('');
     try {
-      const payload={name:form.name.trim(),dosage:form.dosage.trim(),reminder_time:form.reminder_time.slice(0,5)+':00'};
+      const days = form.long_term ? null : Number(form.duration_days);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(form.start_date) || (!form.long_term && (!Number.isInteger(days) || days < 1 || days > 3650))) {
+        setMsg('Enter a valid treatment start date and, for short-term medication, a duration (1–3650 days).');
+        return;
+      }
+      // Existing DB check constraint supports a start date plus one treatment-end method.
+      // Use duration_days and leave end_date null; the UI calculates the final date.
+      const payload={name:form.name.trim(),dosage:form.dosage.trim(),reminder_time:form.reminder_time.slice(0,5)+':00',start_date:form.start_date,duration_days:days,end_date:null};
       const result=editing ? await supabase.from('medications').update(payload).eq('id',editing) : await supabase.from('medications').insert({...payload,patient_id:form.patient_id});
       if(result.error) setMsg(result.error.message);
-      else {setEditing(null);setForm({...blank});await refresh();setPage('medications');}
+      else {setEditing(null);setForm({...blank,start_date:localDay()});await refresh();setPage('medications');}
     } catch(e){setMsg(e.message);}finally{setBusy(false);}
   }
   async function deleteMed(m) {
@@ -101,7 +108,7 @@ function App() {
       if (!data?.length) {
         setMsg('Delete was not applied. Check the caregiver DELETE permission in Supabase Row Level Security.');
       } else {
-        if (editing === m.id) { setEditing(null); setForm({ ...blank }); }
+        if (editing === m.id) { setEditing(null); setForm({ ...blank, start_date:localDay() }); }
         await refresh();
       }
     } catch (e) {
@@ -109,6 +116,7 @@ function App() {
     } finally { setBusy(false); }
   }
   async function confirm(m) {
+    if(m.patient_id !== session?.user?.id){setMsg('You can only confirm medications assigned to your own account.');return;}
     if(!window.confirm(`Confirm you took ${m.name}?`))return;
     setBusy(true);setMsg('');
     try {
@@ -116,7 +124,7 @@ function App() {
       if(error)setMsg(error.message);else await refresh();
     } catch(e){setMsg(e.message);}finally{setBusy(false);}
   }
-  function startEdit(m){setEditing(m.id);setForm({name:m.name,dosage:m.dosage,reminder_time:m.reminder_time,patient_id:m.patient_id});setPage('manage');window.scrollTo({top:0,behavior:'smooth'});}
+  function startEdit(m){setEditing(m.id);setForm({name:m.name,dosage:m.dosage,reminder_time:m.reminder_time,patient_id:m.patient_id,start_date:m.start_date||localDay(),duration_days:String(m.duration_days || (m.start_date && m.end_date ? Math.max(1,Math.round((new Date(m.end_date+'T12:00:00Z')-new Date(m.start_date+'T12:00:00Z'))/86400000)+1) : 7)),long_term:!m.duration_days && !m.end_date});setPage('manage');window.scrollTo({top:0,behavior:'smooth'});}
   const caregiver=profile?.role==='caregiver';
   const today=localDay();
   const visibleMeds=useMemo(() => meds.filter(m => !caregiver || patientFilter==='all' || m.patient_id===patientFilter),[meds,caregiver,patientFilter]);
@@ -128,7 +136,7 @@ function App() {
   const pending=active.length-confirmed;
   const progress=active.length ? Math.round(confirmed/active.length*100) : 0;
   const displayed=visibleMeds.filter(m=>(showInactive || m.active) && `${m.name} ${m.dosage}`.toLowerCase().includes(search.toLowerCase()));
-  const nameForPatient=id=>patients.find(p=>p.patient_id===id)?.profiles?.display_name || 'Patient';
+  const nameForPatient=id=>id===session?.user?.id?'Myself':(patients.find(p=>p.patient_id===id)?.profiles?.display_name || 'Patient');
 
   if(loading || (session && !profile && !msg))return <div className="loading-screen"><div className="spinner"/><p>Loading Medication Reminder...</p></div>;
   if(!session)return <main className="auth-page"><div className="auth-layout">
@@ -142,7 +150,7 @@ function App() {
     <aside className="sidebar"><div className="sidebar-brand"><span className="sidebar-logo">✚</span><span>Medication<br/>Reminder</span></div><div className="sidebar-label">WORKSPACE</div><nav aria-label="Main navigation">{nav.map(([id,ico,label])=><button key={id} className={`nav-link ${page===id?'selected':''}`} onClick={()=>setPage(id)}><span>{ico}</span>{label}</button>)}</nav><div className="sidebar-bottom"><div className="account-box"><div className="avatar">{(profile.display_name||'U').charAt(0).toUpperCase()}</div><div><strong>{profile.display_name||'User'}</strong><small>{caregiver?'Caregiver':'Patient'} account</small></div></div><button className="nav-link logout" onClick={signOut}><span>↪</span>Sign out</button></div></aside>
     <div className="workspace"><header className="topbar"><div className="mobile-brand">✚ Medication Reminder</div><div className="topbar-date">{new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'})}</div><div className="topbar-right"><span className="role-chip">{caregiver?'♡ Caregiver':'♡ Patient'}</span><button className="refresh-button" onClick={()=>refresh()} disabled={refreshing}>{refreshing?'Refreshing...':'↻ Refresh'}</button></div></header><main className="content">
       {msg&&<div className="error" role="alert">{msg}<button aria-label="Dismiss error" onClick={()=>setMsg('')}>×</button></div>}
-      {caregiver&&patients.length>0&&<div className="patient-picker"><label htmlFor="patientFilter">Viewing patient</label><select id="patientFilter" value={patientFilter} onChange={e=>setPatientFilter(e.target.value)}><option value="all">All linked patients</option>{patients.map(p=><option key={p.patient_id} value={p.patient_id}>{p.profiles?.display_name||p.patient_id}</option>)}</select></div>}
+      {caregiver&&<div className="patient-picker"><label htmlFor="patientFilter">Viewing patient</label><select id="patientFilter" value={patientFilter} onChange={e=>setPatientFilter(e.target.value)}><option value="all">All medications</option><option value={session.user.id}>My medications</option>{patients.map(p=><option key={p.patient_id} value={p.patient_id}>{p.profiles?.display_name||p.patient_id}</option>)}</select></div>}
       {page==='dashboard'&&<>
         <section className="welcome-banner"><div><span className="banner-kicker">YOUR CARE AT A GLANCE</span><h1>{caregiver?'Care starts with staying connected.':'Good to see you, '+(profile.display_name||'there')+'!'}</h1><p>{caregiver?'Review medication schedules and patient-reported confirmations.':'Stay on top of your medication schedule, one step at a time.'}</p></div><div className="banner-art" aria-hidden="true">♡<span>✚</span></div></section>
         <div className="section-title"><h2>Today's overview</h2><span>{new Date().toLocaleDateString('en-US',{month:'long',day:'numeric'})}</span></div>
@@ -152,9 +160,9 @@ function App() {
         <div className="med-grid">{active.length?active.slice(0,4).map(m=>medCard(m)): <div className="surface empty">No active medications available.</div>}</div>
         <section className="surface recent"><div className="section-title"><h2>Recent activity</h2><button className="text-action" onClick={()=>setPage('history')}>Full history →</button></div>{visibleLogs.length?<div className="activity-list">{visibleLogs.slice(0,4).map(l=><div key={l.id} className="activity-item"><span className="activity-dot">✓</span><div><strong>{meds.find(m=>m.id===l.medication_id)?.name||'Medication'}</strong><small>{l.status.replaceAll('_',' ')} · {niceSchedule(l.scheduled_for)}</small></div><span className="activity-status">{l.status==='patient_reported_taken'?'Reported':'Logged'}</span></div>)}</div>:<p className="subtle">No dose activity recorded yet.</p>}</section>
       </>}
-      {page==='medications'&&<><div className="page-heading"><div><span className="eyebrow dark">MEDICATION SCHEDULE</span><h1>{caregiver?'Managed medications':'My medications'}</h1><p>Review scheduled doses and patient-reported status.</p></div>{caregiver&&<button className="primary" onClick={()=>{setEditing(null);setForm({...blank});setPage('manage');}}>+ Add medication</button>}</div><div className="toolbar"><input aria-label="Search medications" placeholder="Search medications..." value={search} onChange={e=>setSearch(e.target.value)}/><label className="toggle"><input type="checkbox" checked={showInactive} onChange={e=>setShowInactive(e.target.checked)}/> Show inactive</label></div><div className="med-grid">{displayed.length?displayed.map(m=>medCard(m)):<div className="surface empty">No medications match your filters.</div>}</div></>}
+      {page==='medications'&&<><div className="page-heading"><div><span className="eyebrow dark">MEDICATION SCHEDULE</span><h1>{caregiver?'Managed medications':'My medications'}</h1><p>Review scheduled doses and patient-reported status.</p></div>{caregiver&&<button className="primary" onClick={()=>{setEditing(null);setForm({...blank,start_date:localDay()});setPage('manage');}}>+ Add medication</button>}</div><div className="toolbar"><input aria-label="Search medications" placeholder="Search medications..." value={search} onChange={e=>setSearch(e.target.value)}/><label className="toggle"><input type="checkbox" checked={showInactive} onChange={e=>setShowInactive(e.target.checked)}/> Show inactive</label></div><div className="med-grid">{displayed.length?displayed.map(m=>medCard(m)):<div className="surface empty">No medications match your filters.</div>}</div></>}
       {page==='history'&&<><div className="page-heading"><div><span className="eyebrow dark">MEDICATION RECORDS</span><h1>Dose history</h1><p>Review recorded dose events and confirmations.</p></div></div><section className="surface history-surface"><div className="table-scroll"><table><thead><tr><th>Scheduled for</th><th>Medication</th>{caregiver&&<th>Patient</th>}<th>Status</th><th>Reported taken at</th></tr></thead><tbody>{visibleLogs.slice(0,100).map(l=><tr key={l.id}><td>{niceSchedule(l.scheduled_for)}</td><td><strong>{meds.find(m=>m.id===l.medication_id)?.name||'Medication'}</strong></td>{caregiver&&<td>{nameForPatient(l.patient_id)}</td>}<td><span className="status-badge reported">{l.status.replaceAll('_',' ')}</span></td><td>{niceDate(l.confirmed_at)}</td></tr>)}</tbody></table></div>{!visibleLogs.length&&<p className="empty">No dose history recorded yet.</p>}</section></>}
-      {page==='manage'&&caregiver&&<><div className="page-heading"><div><span className="eyebrow dark">CAREGIVER TOOLS</span><h1>{editing?'Edit medication':'Add medication'}</h1><p>Manage medications for linked patients.</p></div></div><section className="surface manage-card"><form className="manage-form" onSubmit={saveMed}>{!editing&&<label>Patient<select value={form.patient_id} onChange={e=>setForm({...form,patient_id:e.target.value})} required><option value="">Choose patient</option>{patients.map(p=><option key={p.patient_id} value={p.patient_id}>{p.profiles?.display_name||p.patient_id}</option>)}</select></label>}<label>Medication name<input maxLength="120" value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="e.g. Test Vitamin D" required/></label><label>Prescribed dose (text)<input maxLength="120" value={form.dosage} onChange={e=>setForm({...form,dosage:e.target.value})} placeholder="e.g. One tablet" required/></label><label>Reminder time<input type="time" value={form.reminder_time.slice(0,5)} onChange={e=>setForm({...form,reminder_time:e.target.value})} required/></label><div className="form-actions"><button className="primary" disabled={busy}>{busy?'Saving...':editing?'Save changes':'Add medication'}</button><button type="button" className="outline" onClick={()=>{setEditing(null);setForm({...blank});setPage('medications');}}>Cancel</button></div></form><p className="subtle">This prototype stores a reminder time, but does not automatically send reminders. Verify all medication details before saving.</p></section></>}
+      {page==='manage'&&caregiver&&<><div className="page-heading"><div><span className="eyebrow dark">CAREGIVER TOOLS</span><h1>{editing?'Edit medication':'Add medication'}</h1><p>Manage medications for yourself or linked patients.</p></div></div><section className="surface manage-card"><form className="manage-form" onSubmit={saveMed}>{!editing&&<label>Patient<select value={form.patient_id} onChange={e=>setForm({...form,patient_id:e.target.value})} required><option value="">Choose patient</option><option value={session.user.id}>Myself (caregiver)</option>{patients.map(p=><option key={p.patient_id} value={p.patient_id}>{p.profiles?.display_name||p.patient_id}</option>)}</select></label>}<label>Medication name<input maxLength="120" value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="e.g. Test Vitamin D" required/></label><label>Prescribed dose (text)<input maxLength="120" value={form.dosage} onChange={e=>setForm({...form,dosage:e.target.value})} placeholder="e.g. One tablet" required/></label><label>Reminder time<input type="time" value={form.reminder_time.slice(0,5)} onChange={e=>setForm({...form,reminder_time:e.target.value})} required/></label><label>Treatment start date<input type="date" value={form.start_date} onChange={e=>setForm({...form,start_date:e.target.value})} required/></label><label>Treatment type<select value={form.long_term?'long':'short'} onChange={e=>setForm({...form,long_term:e.target.value==='long'})}><option value="short">Short-term (fixed number of days)</option><option value="long">Long-term (no planned end date)</option></select></label>{!form.long_term&&<label>Treatment duration (days)<input type="number" min="1" max="3650" step="1" value={form.duration_days} onChange={e=>setForm({...form,duration_days:e.target.value})} required/></label>}<div className="treatment-preview">{form.long_term?<><strong>Long-term medication:</strong> No scheduled end date.<small>Stores start_date; leaves duration_days and end_date empty.</small></>:<><strong>Calculated last treatment day:</strong> {(() => { const n=Number(form.duration_days);if(!form.start_date||!Number.isInteger(n)||n<1||n>3650)return 'Enter a valid date and duration';const d=new Date(form.start_date+'T12:00:00Z');if(Number.isNaN(d.getTime()))return 'Invalid start date';d.setUTCDate(d.getUTCDate()+n-1);return d.toLocaleDateString('en-US',{timeZone:'UTC',month:'short',day:'numeric',year:'numeric'});})()} <small>Start and end dates are inclusive. Stored as start_date + duration_days.</small></>}</div><div className="form-actions"><button className="primary" disabled={busy}>{busy?'Saving...':editing?'Save changes':'Add medication'}</button><button type="button" className="outline" onClick={()=>{setEditing(null);setForm({...blank,start_date:localDay()});setPage('medications');}}>Cancel</button></div></form><p className="subtle">This prototype stores a reminder time, but does not automatically send reminders. Verify all medication details before saving.</p></section></>}
       <footer className="app-footer">Medication Reminder · Prototype only · Use test records · No automatic calls or escalations enabled</footer>
     </main></div>
     <nav className="mobile-nav" aria-label="Mobile navigation">{nav.map(([id,ico,label])=><button key={id} className={page===id?'selected':''} onClick={()=>setPage(id)}><span>{ico}</span><small>{label}</small></button>)}<button onClick={signOut}><span>↪</span><small>Sign out</small></button></nav>
@@ -162,7 +170,8 @@ function App() {
 
   function medCard(m) {
     const reported=todayLogs.find(l=>l.medication_id===m.id && l.status==='patient_reported_taken');
-    return <article className="med-card" key={m.id}><div className="med-card-top"><span className="med-symbol">✚</span><span className={`status-badge ${!m.active?'inactive':reported?'reported':'waiting'}`}>{!m.active?'Inactive':reported?'Confirmed':'Awaiting confirmation'}</span></div><h3>{m.name}</h3><p className="dose-text">{m.dosage}</p>{caregiver&&<p className="patient-caption">Patient: {nameForPatient(m.patient_id)}</p>}<div className="med-time"><span>◷</span><div><small>Scheduled reminder</small><strong>{shortTime(m.reminder_time)}</strong></div></div>{reported&&<p className="confirmed-caption">✓ Reported taken: {niceDate(reported.confirmed_at)}</p>}<div className="med-actions">{caregiver?<><button className="outline" onClick={()=>startEdit(m)}>Edit medication</button><button className="danger" disabled={busy} onClick={()=>deleteMed(m)}>Delete</button></>:m.active&&<button className="primary" disabled={busy||Boolean(reported)} onClick={()=>confirm(m)}>{reported?'✓ Confirmed today':'✓ I took this medication'}</button>}</div></article>;
+    const ownMedication = m.patient_id === session?.user?.id;
+    return <article className="med-card" key={m.id}><div className="med-card-top"><span className="med-symbol">✚</span><span className={`status-badge ${!m.active?'inactive':reported?'reported':'waiting'}`}>{!m.active?'Inactive':reported?'Confirmed':'Awaiting confirmation'}</span></div><h3>{m.name}</h3><p className="dose-text">{m.dosage}</p>{caregiver&&<p className="patient-caption">Patient: {nameForPatient(m.patient_id)}</p>}<div className="med-time"><span>◷</span><div><small>Scheduled reminder</small><strong>{shortTime(m.reminder_time)}</strong></div></div>{reported&&<p className="confirmed-caption">✓ Reported taken: {niceDate(reported.confirmed_at)}</p>}<div className="med-actions">{caregiver?<><button className="outline" onClick={()=>startEdit(m)}>Edit medication</button><button className="danger" disabled={busy} onClick={()=>deleteMed(m)}>Delete</button>{ownMedication&&m.active&&<button className="primary" disabled={busy||Boolean(reported)} onClick={()=>confirm(m)}>{reported?'✓ Confirmed today':'✓ I took this medication'}</button>}</>:m.active&&<button className="primary" disabled={busy||Boolean(reported)} onClick={()=>confirm(m)}>{reported?'✓ Confirmed today':'✓ I took this medication'}</button>}</div></article>;
   }
 }
 
