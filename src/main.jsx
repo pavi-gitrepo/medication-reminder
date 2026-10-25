@@ -85,11 +85,28 @@ function App() {
       else {setEditing(null);setForm({...blank});await refresh();setPage('medications');}
     } catch(e){setMsg(e.message);}finally{setBusy(false);}
   }
-  async function deactivate(m) {
-    if(!window.confirm(`Deactivate ${m.name}?`))return;
-    setBusy(true);setMsg('');
-    try {const {error}=await supabase.from('medications').update({active:false}).eq('id',m.id);if(error)setMsg(error.message);else await refresh();}
-    catch(e){setMsg(e.message);}finally{setBusy(false);}
+  async function deleteMed(m) {
+    if (profile?.role !== 'caregiver') return;
+    const linkedLogs = logs.filter(l => l.medication_id === m.id).length;
+    if (linkedLogs > 0) {
+      setMsg(`Cannot permanently delete ${m.name}: it has recorded dose history. Deletion is blocked to preserve the records.`);
+      return;
+    }
+    if (!window.confirm(`Permanently delete ${m.name}? This cannot be undone. Only delete fictional test medications.`)) return;
+    setBusy(true);
+    setMsg('');
+    try {
+      const { data, error } = await supabase.from('medications').delete().eq('id', m.id).select('id');
+      if (error) throw error;
+      if (!data?.length) {
+        setMsg('Delete was not applied. Check the caregiver DELETE permission in Supabase Row Level Security.');
+      } else {
+        if (editing === m.id) { setEditing(null); setForm({ ...blank }); }
+        await refresh();
+      }
+    } catch (e) {
+      setMsg(e.message || 'Unable to delete medication. It may have dose history or database restrictions.');
+    } finally { setBusy(false); }
   }
   async function confirm(m) {
     if(!window.confirm(`Confirm you took ${m.name}?`))return;
@@ -145,7 +162,7 @@ function App() {
 
   function medCard(m) {
     const reported=todayLogs.find(l=>l.medication_id===m.id && l.status==='patient_reported_taken');
-    return <article className="med-card" key={m.id}><div className="med-card-top"><span className="med-symbol">✚</span><span className={`status-badge ${!m.active?'inactive':reported?'reported':'waiting'}`}>{!m.active?'Inactive':reported?'Confirmed':'Awaiting confirmation'}</span></div><h3>{m.name}</h3><p className="dose-text">{m.dosage}</p>{caregiver&&<p className="patient-caption">Patient: {nameForPatient(m.patient_id)}</p>}<div className="med-time"><span>◷</span><div><small>Scheduled reminder</small><strong>{shortTime(m.reminder_time)}</strong></div></div>{reported&&<p className="confirmed-caption">✓ Reported taken: {niceDate(reported.confirmed_at)}</p>}<div className="med-actions">{caregiver?<><button className="outline" onClick={()=>startEdit(m)}>Edit medication</button>{m.active&&<button className="danger" disabled={busy} onClick={()=>deactivate(m)}>Deactivate</button>}</>:m.active&&<button className="primary" disabled={busy||Boolean(reported)} onClick={()=>confirm(m)}>{reported?'✓ Confirmed today':'✓ I took this medication'}</button>}</div></article>;
+    return <article className="med-card" key={m.id}><div className="med-card-top"><span className="med-symbol">✚</span><span className={`status-badge ${!m.active?'inactive':reported?'reported':'waiting'}`}>{!m.active?'Inactive':reported?'Confirmed':'Awaiting confirmation'}</span></div><h3>{m.name}</h3><p className="dose-text">{m.dosage}</p>{caregiver&&<p className="patient-caption">Patient: {nameForPatient(m.patient_id)}</p>}<div className="med-time"><span>◷</span><div><small>Scheduled reminder</small><strong>{shortTime(m.reminder_time)}</strong></div></div>{reported&&<p className="confirmed-caption">✓ Reported taken: {niceDate(reported.confirmed_at)}</p>}<div className="med-actions">{caregiver?<><button className="outline" onClick={()=>startEdit(m)}>Edit medication</button><button className="danger" disabled={busy} onClick={()=>deleteMed(m)}>Delete</button></>:m.active&&<button className="primary" disabled={busy||Boolean(reported)} onClick={()=>confirm(m)}>{reported?'✓ Confirmed today':'✓ I took this medication'}</button>}</div></article>;
   }
 }
 
